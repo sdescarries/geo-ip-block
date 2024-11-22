@@ -1,0 +1,139 @@
+#!/bin/bash
+
+function abort {
+  echo "${@}" 1>&2
+  exit 1
+}
+
+function download {
+  if [ -f /usr/bin/wget ]
+  then
+    wget -q -U geo-ip-block -O "/tmp/geo-ip-block/${1}" "${2}" ||
+      rm "/tmp/geo-ip-block/${1}"
+  else
+    curl -s -A geo-ip-block -o "/tmp/geo-ip-block/${1}" "${2}" ||
+      rm "/tmp/geo-ip-block/${1}"
+  fi
+
+  echo "✅ Downloaded ${1}"
+}
+
+function delete-ipsets {
+
+  if ! firewall-cmd --info-ipset="geo-ip-block-list-${1}" &> /dev/null
+  then
+    return
+  fi
+
+  firewall-cmd \
+    --permanent \
+    --zone=drop \
+    --remove-source=ipset:"geo-ip-block-list-${1}" > /dev/null
+
+  firewall-cmd \
+    --reload > /dev/null
+
+  firewall-cmd \
+    --permanent \
+    --delete-ipset="geo-ip-block-list-${1}" > /dev/null
+
+  echo "✅ Deleted geo-ip-block-list-${1}"
+}
+
+function load-entries {
+  for f in /tmp/geo-ip-block/*-${1}.zone
+  do
+    firewall-cmd \
+      --permanent \
+      --ipset="geo-ip-block-list-${1}" \
+      --add-entries-from-file="${f}" > /dev/null ||
+      abort "Failed loading ${f}"
+
+    echo "✅ Loaded ${f}"
+  done
+
+  firewall-cmd \
+    --permanent \
+    --zone=drop \
+    --add-source="ipset:geo-ip-block-list-${1}" > /dev/null ||
+    abort "Failed adding source for ${1}"
+
+  echo "✅ Added source geo-ip-block-list-${1}"
+}
+
+function banner {
+  echo -e '\033[0;94m'
+  cat << EOF
+   █████████                  ████████████████
+  ███░░░░░███                ░░███░░███░░░░░███
+ ███     ░░░   ██████  ██████ ░███ ░███    ░███
+░███          ███░░██████░░███░███ ░██████████
+░███    █████░███████░███ ░███░███ ░███░░░░░░
+░░███  ░░███ ░███░░░ ░███ ░███░███ ░███
+ ░░█████████ ░░██████░░██████ ██████████
+  ░░░░░░░░░   ░░░░░░  ░░░░░░ ░░░░░░░░░░
+EOF
+  echo -e '\033[0m'
+}
+
+{
+
+ZONES="${@}"
+
+[ ! -z "${ZONES}" ] ||
+  abort "Usage: geo-ip-block <country code> [country code] ..."
+
+[ "${EUID}" -eq 0 ] ||
+  abort "Must run as root, please retry with sudo geo-ip-block"
+
+# Save all output to log file
+log="${0}-$(date -I).log"
+exec > >(tee "${log}") 2>&1
+
+banner
+echo -e "Execution time: $(date -Isec)"
+
+rm -rf /tmp/geo-ip-block &&
+mkdir -p /tmp/geo-ip-block ||
+  abort "Cannot write to /tmp/geo-ip-block"
+
+for z in ${ZONES}
+do
+  download $z-ip4.zone "https://www.ipdeny.com/ipblocks/data/aggregated/$z-aggregated.zone"
+  download $z-ip6.zone "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/$z-aggregated.zone"
+done
+
+delete-ipsets "ip4"
+delete-ipsets "ip6"
+
+firewall-cmd \
+  --permanent \
+  --new-ipset="geo-ip-block-list-ip4" \
+  --type=hash:net \
+  --option=family=inet \
+  --option=hashsize=4096 \
+  --option=maxelem=200000 \
+  --zone=drop > /dev/null ||
+  abort "Failed creating ip4 block list"
+echo "✅ Created geo-ip-block-list-ip4"
+
+firewall-cmd \
+  --permanent \
+  --new-ipset="geo-ip-block-list-ip6" \
+  --type=hash:net \
+  --option=family=inet6 \
+  --option=hashsize=4096 \
+  --option=maxelem=200000 \
+  --zone=drop > /dev/null ||
+  abort "Failed creating ip6 block list"
+echo "✅ Created geo-ip-block-list-ip6"
+
+load-entries ip4
+load-entries ip6
+
+firewall-cmd --reload > /dev/null ||
+  abort "Failed reloading firewall"
+
+echo "✅ Firewall updated successfully"
+
+}
