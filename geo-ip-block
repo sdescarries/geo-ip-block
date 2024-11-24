@@ -5,14 +5,30 @@ function abort {
   exit 1
 }
 
-function download {
+function check-su {
+  [ "${EUID}" -eq 0 ] ||
+    abort "Must run as root, please retry with sudo geo-ip-block"
+}
 
-  [ -f "${0}.key" ] ||
-    abort "Missing license file ${0}.key"
+function apply {
+  check-su
+  firewall-cmd --reload > /dev/null ||
+    abort "Failed reloading firewall"
+  echo "✅ Firewall updated successfully"
+}
 
-  local key="$(cat ${0}.key)"
+function sort-zone {
+  sort -gt '.' db/zone${1}.tmp -o zone${1}
+  local count=$(cat zone${1} | wc -l)
+  echo -e "Loaded ${count} zones for IPv${1}"
+}
+
+function download-maxmind {
+  mkdir -p db
+
+  local key="$(cat geo-ip-block.key)"
   local url="https://download.maxmind.com/geoip/databases/GeoLite2-Country-CSV/download?suffix=zip"
-  local out="GeoLite2-Country-CSV.zip"
+  local out="db/GeoLite2-Country-CSV.zip"
 
   if [ -f "${out}" ]
   then
@@ -27,18 +43,49 @@ function download {
     fi
   fi
 
-  rm -rf "${out}"
+  rm -f "${out}"
 
   curl -fs -JLA geo-ip-block -u "${key}" -o "${out}" "${url}" ||
     abort "Failed downloading ${out}"
   echo "✅ Downloaded ${out}"
 
-  rm -rf db
-  unzip -qjd db "${out}"
+  unzip -qojd db "${out}"
   echo "✅ Extracted ${out}"
 }
 
-function build-ip-block-list {
+function download-ipdeny {
+  mkdir -p db
+
+  local url="${2}"
+  local out="${1}"
+
+  if [ -f "${out}" ]
+  then
+    local now=$(date +%s)
+    local age=$(stat -c %Y ${out})
+    age=$((${now} - ${age}))
+
+    if [ ${age} -lt 86400 ]
+    then
+      echo "✅ Up to date ${out}"
+      return
+    fi
+  fi
+
+  rm -f "${out}"
+
+  curl -fs -JLA geo-ip-block -o "${out}" "${url}" ||
+    echo -n '' > "${out}"
+  echo "✅ Downloaded ${out}"
+}
+
+function update-maxmind {
+
+  [ ! -z "${1}" ] ||
+    abort "Missing country codes"
+
+  download-maxmind
+
   local codes=$(echo "$@" | sed "s/ /|/g")
   sed \
     -nE "s/([0-9]+),.*,(${codes}),.*/\1/Ip" \
@@ -47,22 +94,58 @@ function build-ip-block-list {
 
   local geoids="$(cat db/geoname_id)"
   geoids=$(echo ${geoids} | sed "s/ /|/g")
-  echo ${geoids}
 
   sed \
-    -nE "s/^([0-9:\.\/]+),(${geoids}),.*/\1/Ip" \
+    -nE "s/^([0-9:\.\/]+),[0-9]+,(${geoids}),.*/\1/Ip" \
     "db/GeoLite2-Country-Blocks-IPv4.csv" \
-    > "db/zone-ip4"
+    > "db/zone4.tmp"
+  sort-zone 4
 
   sed \
-    -nE "s/^([0-9:\.\/]+),(${geoids}),.*/\1/Ip" \
+    -nE "s/^([0-9:\.\/]+),[0-9]+,(${geoids}),.*/\1/Ip" \
     "db/GeoLite2-Country-Blocks-IPv6.csv" \
-    > "db/zone-ip6"
+    > "db/zone6.tmp"
+  sort-zone 6
+}
+
+function update-ipdeny {
+
+  [ ! -z "${1}" ] ||
+    abort "Missing country codes"
+
+  mkdir -p db
+  echo -n '' > db/zone4.tmp
+  echo -n '' > db/zone6.tmp
+
+  for z in "${@}"
+  do
+    download-ipdeny db/$z-ip4.zone "https://www.ipdeny.com/ipblocks/data/aggregated/$z-aggregated.zone"
+    download-ipdeny db/$z-ip6.zone "https://www.ipdeny.com/ipv6/ipaddresses/aggregated/$z-aggregated.zone"
+
+    cat db/$z-ip4.zone >> db/zone4.tmp
+    cat db/$z-ip6.zone >> db/zone6.tmp
+  done
+
+  sort-zone 4
+  sort-zone 6
+}
+
+function update {
+  if [ -f "geo-ip-block.key" ]
+  then
+    update-maxmind "${@}"
+  else
+    update-ipdeny "${@}"
+  fi
+}
+
+function exists-ipset {
+  firewall-cmd --permanent --info-ipset="geo-ip-block-list-${1}" &> /dev/null
 }
 
 function delete-ipsets {
-
-  if ! firewall-cmd --permanent --info-ipset="geo-ip-block-list-${1}" &> /dev/null
+  check-su
+  if ! exists-ipset "${1}"
   then
     return
   fi
@@ -70,23 +153,62 @@ function delete-ipsets {
   firewall-cmd \
     --permanent \
     --zone=drop \
-    --remove-source=ipset:"geo-ip-block-list-${1}" > /dev/null
+    --remove-source=ipset:"geo-ip-block-list-${1}" > /dev/null ||
+    abort "Failed removing source ${1}"
 
-  firewall-cmd \
-    --reload > /dev/null
+  apply
 
   firewall-cmd \
     --permanent \
-    --delete-ipset="geo-ip-block-list-${1}" > /dev/null
+    --delete-ipset="geo-ip-block-list-${1}" > /dev/null ||
+    abort "Failed deleting ipset ${1}"
 
   echo "✅ Deleted geo-ip-block-list-${1}"
 }
 
-function load-entries {
+function delete {
+  check-su
+  delete-ipsets ip4
+  delete-ipsets ip6
+}
+
+function create {
+  check-su
+  if ! exists-ipset "ip4"
+  then
+    firewall-cmd \
+      --permanent \
+      --new-ipset="geo-ip-block-list-ip4" \
+      --type=hash:net \
+      --option=family=inet \
+      --option=hashsize=4096 \
+      --option=maxelem=1000000 \
+      --zone=drop > /dev/null ||
+      abort "Failed creating ip4 block list"
+    echo "✅ Created geo-ip-block-list-ip4"
+  fi
+
+  if ! exists-ipset "ip6"
+  then
+    firewall-cmd \
+      --permanent \
+      --new-ipset="geo-ip-block-list-ip6" \
+      --type=hash:net \
+      --option=family=inet6 \
+      --option=hashsize=4096 \
+      --option=maxelem=1000000 \
+      --zone=drop > /dev/null ||
+      abort "Failed creating ip6 block list"
+    echo "✅ Created geo-ip-block-list-ip6"
+  fi
+}
+
+function load-net {
+  check-su
   firewall-cmd \
     --permanent \
     --ipset="geo-ip-block-list-${1}" \
-    --add-entries-from-file="db/zone-${1}" > /dev/null ||
+    --add-entries-from-file="zone${1}" > /dev/null ||
     abort "Failed loading ${f}"
 
   echo "✅ Loaded ${f}"
@@ -98,6 +220,11 @@ function load-entries {
     abort "Failed adding source for ${1}"
 
   echo "✅ Added source geo-ip-block-list-${1}"
+}
+
+function load {
+  load-net 4
+  load-net 6
 }
 
 function banner {
@@ -115,59 +242,29 @@ EOF
   echo -e '\033[0m'
 }
 
+function full {
+  update "${@}"
+  delete
+  create
+  load
+  apply
+}
+
 {
 
-ZONES="${@}"
-
-[ ! -z "${ZONES}" ] ||
-  abort "Usage: geo-ip-block <country code> [country code] ..."
-
-[ "${EUID}" -eq 0 ] ||
-  abort "Must run as root, please retry with sudo geo-ip-block"
+COMMAND="${1}"
+shift
 
 # Save all output to log file
 log="${0}-$(date -I).log"
 exec > >(tee "${log}") 2>&1
 
 banner
-echo -e "Execution time: $(date -Isec)"
+echo -e "Time: $(date -Isec)"
+echo -e "Args: ${COMMAND} ${@}"
 
 pushd $(dirname ${0}) &> /dev/null
 
-download
-build-ip-block-list ${ZONES}
-
-delete-ipsets ip4
-delete-ipsets ip6
-
-firewall-cmd \
-  --permanent \
-  --new-ipset="geo-ip-block-list-ip4" \
-  --type=hash:net \
-  --option=family=inet \
-  --option=hashsize=4096 \
-  --option=maxelem=200000 \
-  --zone=drop > /dev/null ||
-  abort "Failed creating ip4 block list"
-echo "✅ Created geo-ip-block-list-ip4"
-
-firewall-cmd \
-  --permanent \
-  --new-ipset="geo-ip-block-list-ip6" \
-  --type=hash:net \
-  --option=family=inet6 \
-  --option=hashsize=4096 \
-  --option=maxelem=200000 \
-  --zone=drop > /dev/null ||
-  abort "Failed creating ip6 block list"
-echo "✅ Created geo-ip-block-list-ip6"
-
-load-entries ip4
-#load-entries ip6
-
-firewall-cmd --reload > /dev/null ||
-  abort "Failed reloading firewall"
-
-echo "✅ Firewall updated successfully"
+${COMMAND} "${@}"
 
 }
