@@ -23,6 +23,24 @@ function sort-zone {
   echo -e "Loaded ${count} zones for IPv${1}"
 }
 
+function up-to-date {
+  if [ -f "${1}" ]
+  then
+    local now=$(date +%s)
+    local age=$(stat -c %Y ${1})
+    age=$((${now} - ${age}))
+
+    if [ ${age} -lt 82800 ]
+    then
+      echo "✅ Up to date ${1}"
+      return 0
+    fi
+  fi
+
+  rm -f "${1}"
+  return 1
+}
+
 function download-maxmind {
   mkdir -p db
 
@@ -30,20 +48,10 @@ function download-maxmind {
   local url="https://download.maxmind.com/geoip/databases/GeoLite2-Country-CSV/download?suffix=zip"
   local out="db/GeoLite2-Country-CSV.zip"
 
-  if [ -f "${out}" ]
+  if up-to-date ${out}
   then
-    local now=$(date +%s)
-    local age=$(stat -c %Y ${out})
-    age=$((${now} - ${age}))
-
-    if [ ${age} -lt 86400 ]
-    then
-      echo "✅ Up to date ${out}"
-      return
-    fi
+    return
   fi
-
-  rm -f "${out}"
 
   curl -fs -JLA geo-ip-block -u "${key}" -o "${out}" "${url}" ||
     abort "Failed downloading ${out}"
@@ -59,20 +67,10 @@ function download-ipdeny {
   local url="${2}"
   local out="${1}"
 
-  if [ -f "${out}" ]
+  if up-to-date ${out}
   then
-    local now=$(date +%s)
-    local age=$(stat -c %Y ${out})
-    age=$((${now} - ${age}))
-
-    if [ ${age} -lt 86400 ]
-    then
-      echo "✅ Up to date ${out}"
-      return
-    fi
+    return
   fi
-
-  rm -f "${out}"
 
   curl -fs -JLA geo-ip-block -o "${out}" "${url}" ||
     echo -n '' > "${out}"
@@ -140,7 +138,7 @@ function update {
 }
 
 function exists-ipset {
-  firewall-cmd --permanent --info-ipset="geo-ip-block-list-${1}" &> /dev/null
+  firewall-cmd --permanent --info-ipset="geo-ip-block-list-ip${1}" &> /dev/null
 }
 
 function delete-ipsets {
@@ -153,28 +151,28 @@ function delete-ipsets {
   firewall-cmd \
     --permanent \
     --zone=drop \
-    --remove-source=ipset:"geo-ip-block-list-${1}" > /dev/null ||
+    --remove-source=ipset:"geo-ip-block-list-ip${1}" > /dev/null ||
     abort "Failed removing source ${1}"
 
   apply
 
   firewall-cmd \
     --permanent \
-    --delete-ipset="geo-ip-block-list-${1}" > /dev/null ||
+    --delete-ipset="geo-ip-block-list-ip${1}" > /dev/null ||
     abort "Failed deleting ipset ${1}"
 
-  echo "✅ Deleted geo-ip-block-list-${1}"
+  echo "✅ Deleted geo-ip-block-list-ip${1}"
 }
 
 function delete {
   check-su
-  delete-ipsets ip4
-  delete-ipsets ip6
+  delete-ipsets 4
+  delete-ipsets 6
 }
 
 function create {
   check-su
-  if ! exists-ipset "ip4"
+  if ! exists-ipset 4
   then
     firewall-cmd \
       --permanent \
@@ -188,7 +186,7 @@ function create {
     echo "✅ Created geo-ip-block-list-ip4"
   fi
 
-  if ! exists-ipset "ip6"
+  if ! exists-ipset 6
   then
     firewall-cmd \
       --permanent \
@@ -207,7 +205,7 @@ function load-net {
   check-su
   firewall-cmd \
     --permanent \
-    --ipset="geo-ip-block-list-${1}" \
+    --ipset="geo-ip-block-list-ip${1}" \
     --add-entries-from-file="zone${1}" > /dev/null ||
     abort "Failed loading ${f}"
 
@@ -216,10 +214,10 @@ function load-net {
   firewall-cmd \
     --permanent \
     --zone=drop \
-    --add-source="ipset:geo-ip-block-list-${1}" > /dev/null ||
+    --add-source="ipset:geo-ip-block-list-ip${1}" > /dev/null ||
     abort "Failed adding source for ${1}"
 
-  echo "✅ Added source geo-ip-block-list-${1}"
+  echo "✅ Added source geo-ip-block-list-ip${1}"
 }
 
 function load {

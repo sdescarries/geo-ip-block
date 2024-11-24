@@ -11,7 +11,7 @@ sudo ./geo-ip-block cn ru kp ir in
 ## Installation
 
 ```sh
-dnf install firewalld
+dnf install firewalld curl unzip
 systemctl enable firewalld
 systemctl start firewalld
 firewall-cmd --permanent --zone=public --add-service=ssh
