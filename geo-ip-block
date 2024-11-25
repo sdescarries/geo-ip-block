@@ -94,13 +94,13 @@ function update-maxmind {
   geoids=$(echo ${geoids} | sed "s/ /|/g")
 
   sed \
-    -nE "s/^([0-9:\.\/]+),[0-9]+,(${geoids}),.*/\1/Ip" \
+    -nE "s/^([0-9:\.\/]+),.*(${geoids}),.*/\1/Ip" \
     "db/GeoLite2-Country-Blocks-IPv4.csv" \
     > "db/zone4.tmp"
   sort-zone 4
 
   sed \
-    -nE "s/^([0-9:\.\/]+),[0-9]+,(${geoids}),.*/\1/Ip" \
+    -nE "s/^([0-9:\.\/]+),.*(${geoids}),.*/\1/Ip" \
     "db/GeoLite2-Country-Blocks-IPv6.csv" \
     > "db/zone6.tmp"
   sort-zone 6
