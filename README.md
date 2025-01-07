@@ -7,6 +7,7 @@ Uses zone info from [IPdeny](https://www.ipdeny.com/ipblocks/) or [GeoLite2](htt
 `geo-ip-block <command> [args]`
 
 command
+
 - `update <CC> [CC]` fetch the latest database and rebuilds zone files
 - `delete` remove existing ip sets
 - `create` create new ip sets
@@ -20,6 +21,7 @@ Full job updates the zones and applies them in firewalld. Run this job as a dail
 ```cron
 0 9 * * * /opt/geo-ip-block/geo-ip-block full xx yy zz
 ```
+
 ----
 Only update the database and generate fresh lists files for IPv4 `zone4` and IPv6 `zone6`, does not need elevated privileges.
 
