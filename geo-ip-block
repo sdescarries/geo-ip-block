@@ -1,7 +1,8 @@
 #!/bin/bash
 
 function abort {
-  echo "${@}" 1>&2
+  echo -e "${@}\n\n" 1>&2
+  cat db/last-cmd.log 1>&2
   exit 1
 }
 
@@ -10,11 +11,14 @@ function check-su {
     abort "Must run as root, please retry with sudo geo-ip-block"
 }
 
-function apply {
+function fwc() {
   check-su
-  firewall-cmd --reload > /dev/null ||
-    abort "Failed reloading firewall"
-  echo "✅ Firewall updated successfully"
+  firewall-cmd "${@}" &> db/last-cmd.log ||
+    abort "Command failed:\n\nfirewall-cmd ${@}"
+}
+
+function apply {
+  fwc --reload
 }
 
 function sort-zone {
@@ -138,85 +142,74 @@ function update {
 }
 
 function exists-ipset {
-  firewall-cmd --permanent --info-ipset="geo-ip-block-list-ip${1}" &> /dev/null
+  [ -f "/etc/firewalld/ipsets/geo-ip-block-list-ip${1}.xml" ]
 }
 
 function delete-ipsets {
-  check-su
   if ! exists-ipset "${1}"
   then
     return
   fi
 
-  firewall-cmd \
+  fwc \
     --permanent \
     --zone=drop \
-    --remove-source=ipset:"geo-ip-block-list-ip${1}" > /dev/null ||
-    abort "Failed removing source ${1}"
-
+    --remove-source=ipset:"geo-ip-block-list-ip${1}"
   apply
 
-  firewall-cmd \
+  fwc \
     --permanent \
-    --delete-ipset="geo-ip-block-list-ip${1}" > /dev/null ||
-    abort "Failed deleting ipset ${1}"
-
+    --delete-ipset="geo-ip-block-list-ip${1}"
+  apply
   echo "✅ Deleted geo-ip-block-list-ip${1}"
 }
 
 function delete {
-  check-su
   delete-ipsets 4
   delete-ipsets 6
+
+  ipset flush
+  ipset destroy
 }
 
 function create {
-  check-su
   if ! exists-ipset 4
   then
-    firewall-cmd \
+    fwc \
       --permanent \
       --new-ipset="geo-ip-block-list-ip4" \
       --type=hash:net \
       --option=family=inet \
       --option=hashsize=4096 \
       --option=maxelem=1000000 \
-      --zone=drop > /dev/null ||
-      abort "Failed creating ip4 block list"
+      --zone=drop
     echo "✅ Created geo-ip-block-list-ip4"
   fi
 
   if ! exists-ipset 6
   then
-    firewall-cmd \
+    fwc \
       --permanent \
       --new-ipset="geo-ip-block-list-ip6" \
       --type=hash:net \
       --option=family=inet6 \
       --option=hashsize=4096 \
       --option=maxelem=1000000 \
-      --zone=drop > /dev/null ||
-      abort "Failed creating ip6 block list"
+      --zone=drop
     echo "✅ Created geo-ip-block-list-ip6"
   fi
 }
 
 function load-net {
-  check-su
-  firewall-cmd \
+  fwc \
     --permanent \
     --ipset="geo-ip-block-list-ip${1}" \
-    --add-entries-from-file="zone${1}" > /dev/null ||
-    abort "Failed loading ${f}"
+    --add-entries-from-file="zone${1}"
 
-  echo "✅ Loaded ${f}"
-
-  firewall-cmd \
+  fwc \
     --permanent \
     --zone=drop \
-    --add-source="ipset:geo-ip-block-list-ip${1}" > /dev/null ||
-    abort "Failed adding source for ${1}"
-
+    --add-source="ipset:geo-ip-block-list-ip${1}"
   echo "✅ Added source geo-ip-block-list-ip${1}"
 }
 
@@ -242,6 +235,13 @@ EOF
 
 function full {
   update "${@}"
+  delete
+  create
+  load
+  apply
+}
+
+function reload {
   delete
   create
   load
